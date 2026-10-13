@@ -8,7 +8,8 @@
   python collect.py --date 2026-10-08  指定日期
   python collect.py --backfill 40      回補最近 40 個交易日的「價量」（沒有法人、本益比、融資券）
 
-只讀環境變數 MAIL_URL、MAIL_TOKEN（寄通知信，選用）與 LAST_RUN（當天最後一次排程設為 1）。
+只讀環境變數 MAIL_URL、MAIL_TOKEN（寄通知信，選用）、LAST_RUN（當天最後一次排程設為 1）、
+SCAN_MAIL（設為 1 時，資料齊全的通知改由 scan.py 的掃描信取代；缺漏警告仍由這裡寄）。
 """
 import argparse
 import csv
@@ -377,19 +378,37 @@ def price_rows(d, res):
 
 
 # ---------- 通知 ----------
+def mail_hint(r, data):
+    """寄信失敗時，依回應判斷最可能的原因（不會印出任何金鑰）。"""
+    head = r.text[:80].replace("\n", " ")
+    if data is None:
+        return "HTTP %s，回應不是 JSON（開頭：%s）。多半是 MAIL_URL 不對（要用 /exec 結尾的「網頁應用程式」網址），或 Apps Script 部署的存取權限不是「任何人」" % (r.status_code, head)
+    if data.get("error") == "unauthorized":
+        return "Apps Script 回覆 unauthorized：MAIL_TOKEN 和 Apps Script「指令碼屬性」裡的 MAIL_TOKEN 不一致（檢查有沒有貼到多餘的空白或漏字）"
+    if data.get("error"):
+        return "Apps Script 回報錯誤：%s" % str(data["error"])[:150]
+    return "HTTP %s，回應：%s" % (r.status_code, head)
+
+
 def send_mail(subject, body):
-    url, token = os.environ.get("MAIL_URL"), os.environ.get("MAIL_TOKEN")
+    url, token = (os.environ.get("MAIL_URL") or "").strip(), (os.environ.get("MAIL_TOKEN") or "").strip()
     if not url or not token:
-        print("未設定 MAIL_URL / MAIL_TOKEN，略過通知")
+        print("通知寄送：略過（MAIL_URL 或 MAIL_TOKEN 沒設定，或值是空的）")
         return False
     try:
         r = requests.post(url, json={"token": token, "subject": subject, "body": body}, timeout=60)
-        ok = r.status_code == 200 and bool(r.json().get("ok"))
-        print("通知寄送：成功" if ok else "通知寄送：失敗 %s" % r.status_code)
-        return ok
     except Exception as e:  # noqa: BLE001
-        print("通知寄送：失敗", str(e)[:100])
+        print("通知寄送：失敗（連線錯誤 %s：%s）" % (type(e).__name__, str(e)[:100]))
         return False
+    try:
+        data = r.json()
+    except ValueError:
+        data = None
+    if r.status_code == 200 and isinstance(data, dict) and data.get("ok"):
+        print("通知寄送：成功")
+        return True
+    print("通知寄送：失敗 —", mail_hint(r, data if isinstance(data, dict) else None))
+    return False
 
 
 # ---------- 主流程 ----------
@@ -459,7 +478,7 @@ def run_day(d, last_run=False):
     meta.update({"date": d.isoformat(), "sources": status, "rows": len(rows), "updated": dt.datetime.now(TZ).isoformat()})
     n_tw = sum(1 for k in rows if k[0] == "TWSE")
     print("已存檔 %s：上市 %d、上櫃 %d；待補來源：%s" % (csv_path(d), n_tw, len(rows) - n_tw, pending or "無"))
-    if not pending and not meta.get("mailed"):
+    if not pending and not meta.get("mailed") and not os.environ.get("SCAN_MAIL"):      # SCAN_MAIL=1：由 scan.py 寄整合信，這裡不重複寄
         body = ["資料已收集完成：%s" % d, "上市 %d 檔、上櫃 %d 檔" % (n_tw, len(rows) - n_tw), ""]
         body += ["%s 上漲 %d／下跌 %d／持平 %d（一般股票 %d 檔）" % (a["market"], a["up"], a["down"], a["flat"], a["n"]) for a in ad]
         if send_mail("【台股】%s 資料已更新" % d, "\n".join(body)):
