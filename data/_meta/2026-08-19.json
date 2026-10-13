@@ -1,0 +1,16 @@
+{
+ "date": "2026-08-19",
+ "sources": {
+  "twse_prices": "ok",
+  "tpex_prices": "ok",
+  "twse_inst": "na",
+  "tpex_inst": "na",
+  "twse_fund": "na",
+  "tpex_fund": "na",
+  "twse_margin": "na",
+  "tpex_margin": "na"
+ },
+ "rows": 2389,
+ "backfilled": true,
+ "updated": "2026-10-13T17:36:45.947903+08:00"
+}
