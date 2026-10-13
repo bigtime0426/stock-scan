@@ -3,14 +3,14 @@
  "sources": {
   "twse_prices": "ok",
   "tpex_prices": "ok",
-  "twse_inst": "na",
-  "tpex_inst": "na",
-  "twse_fund": "na",
-  "tpex_fund": "na",
-  "twse_margin": "na",
-  "tpex_margin": "na"
+  "twse_inst": "ok",
+  "tpex_inst": "ok",
+  "twse_fund": "pending",
+  "tpex_fund": "ok",
+  "twse_margin": "pending",
+  "tpex_margin": "ok"
  },
  "rows": 2394,
  "backfilled": true,
- "updated": "2026-10-13T17:29:55.558908+08:00"
+ "updated": "2026-10-14T01:33:19.324463+08:00"
 }
