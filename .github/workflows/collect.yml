@@ -16,6 +16,9 @@ on:
       date:
         description: '指定日期 YYYY-MM-DD（留空 = 最近一個交易日）'
         default: ''
+      backfill_inst:
+        description: '補最近幾個交易日的「上市」三大法人買賣超（0 = 不補；給連買排名用）'
+        default: '0'
       test_mail:
         description: '1 = 只寄一封測試信，確認寄信設定（不收集、不掃描）'
         default: '0'
@@ -58,13 +61,14 @@ jobs:
           LAST_RUN: ${{ github.event.schedule == '5 14 * * 1-5' && '1' || '0' }}
           SCAN_MAIL: '1'
           BACKFILL: ${{ github.event.inputs.backfill }}
+          BACKFILL_INST: ${{ github.event.inputs.backfill_inst }}
           TARGET_DATE: ${{ github.event.inputs.date }}
-        run: python collect.py --backfill "${BACKFILL:-0}" ${TARGET_DATE:+--date "$TARGET_DATE"}
+        run: python collect.py --backfill "${BACKFILL:-0}" --backfill-inst "${BACKFILL_INST:-0}" ${TARGET_DATE:+--date "$TARGET_DATE"}
 
       # 掃描並寄信。放在「存回資料」之前、而且失敗不影響後面：就算掃描出錯，當天收集到的資料也一定會存回去。
       # 排程跑：資料齊了才寄（當天最後一輪沒齊也寄一封註明的）。手動跑：一律重寄一封，方便你測試。
       - name: 掃描並寄信
-        if: ${{ github.event.inputs.test_mail != '1' && (github.event_name == 'schedule' || github.event.inputs.backfill == '' || github.event.inputs.backfill == '0') }}
+        if: ${{ github.event.inputs.test_mail != '1' && (github.event_name == 'schedule' || ((github.event.inputs.backfill == '' || github.event.inputs.backfill == '0') && (github.event.inputs.backfill_inst == '' || github.event.inputs.backfill_inst == '0'))) }}
         continue-on-error: true
         env:
           MAIL_URL: ${{ secrets.MAIL_URL }}
