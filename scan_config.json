@@ -34,5 +34,29 @@
       "who": "foreign",
       "days": 3
     }
+  },
+
+  "revenue": {
+    "_說明": "月營收掃描（信裡的第四段）。patterns 每一組是一種組合：yoy 是「今年當月 vs 去年同月」，mom 是「本月 vs 上月」，值可填 down（今年低於去年／本月低於上月）、up（高於）、any（不限）。預設兩組：兩者都減、兩者都增。想看「年減但月增」之類的背離，改這裡的 yoy / mom 即可，例如 {\"name\": \"年減但月增\", \"yoy\": \"down\", \"mom\": \"up\"}。min_value 是成交值下限（元），避免冷門股占滿名單。sort：yoy_abs（年增率絕對值大的在前）、mom_abs、value。max_results 是每組最多列幾檔。title 是信裡這一段的標題，想改名字改這裡。enabled 改成 false 就整段不出現。",
+    "enabled": true,
+    "title": "市場建議股票掃描",
+    "min_value": 100000000,
+    "max_results": 10,
+    "sort": "yoy_abs",
+    "patterns": [
+      {"name": "年減且月減", "yoy": "down", "mom": "down"},
+      {"name": "年增且月增", "yoy": "up", "mom": "up"}
+    ]
+  },
+
+  "inst_rank": {
+    "_說明": "三大法人連續買超排名（信裡的第五段）。who：inst（三大法人合計）、foreign（外資）、trust（投信）。min_days 是至少連買幾日才列入；min_value 是成交值下限（元）；top 是列出幾檔；lookback 是最多往回看幾個交易日。法人資料上市可用 --backfill-inst 回補，上櫃從開始收集那天起累積。",
+    "enabled": true,
+    "title": "三大法人連續買超排名",
+    "who": "inst",
+    "min_days": 3,
+    "min_value": 100000000,
+    "top": 10,
+    "lookback": 40
   }
 }
