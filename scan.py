@@ -41,6 +41,9 @@ DEFAULTS = {
     "screen": {"pe_min": 0, "pe_max": 30, "min_value": 100000000, "bias_min": -8, "bias_max": 0,
                "vol_ratio_max": 0.7, "sort": "value", "max_results": 20,
                "inst_streak": {"enabled": False, "who": "foreign", "days": 3}},
+    "revenue": {"enabled": True, "title": "市場建議股票掃描", "min_value": 100000000, "max_results": 10, "sort": "yoy_abs",
+                "patterns": [{"name": "年減且月減", "yoy": "down", "mom": "down"}, {"name": "年增且月增", "yoy": "up", "mom": "up"}]},
+    "inst_rank": {"enabled": True, "title": "三大法人連續買超排名", "who": "inst", "min_days": 3, "min_value": 100000000, "top": 10, "lookback": 40},
 }
 # 掃描信真正用到的來源：價量（含上市本益比）、上櫃本益比、法人買賣超。
 # 證交所的殖利率／淨值比（twse_fund）和各市場融資融券這封信沒用到，沒齊不影響信件，也不擋寄信。
@@ -202,10 +205,98 @@ def screen(hist, cfg):
     return pool, stages, note, short
 
 
+# ---------- 月營收與法人連買 ----------
+def load_revenue():
+    d = os.path.join(collect.DATA, "revenue")
+    files = sorted(x for x in os.listdir(d) if re.fullmatch(r"\d{4}-\d{2}\.csv", x)) if os.path.isdir(d) else []
+    if not files:
+        return None, {}
+    with open(os.path.join(d, files[-1]), encoding="utf-8-sig", newline="") as fh:
+        return files[-1][:-4], {r["code"]: r for r in csv.DictReader(fh)}
+
+
+def direction(a, b):
+    return "up" if a > b else "down" if a < b else "flat"
+
+
+def rev_line(m, yoy, mom):
+    close = ("收 %s" % ("%.2f" % m["close"]).rstrip("0").rstrip(".")) + ("（%+.2f%%）" % m["pct"] if m["pct"] is not None else "") if m["close"] is not None else "今日無成交"
+    return "%s %s｜年增率 %+.1f%%｜月增率 %+.1f%%｜%s｜成交 %.1f億" % (m["code"], m["name"], yoy, mom, close, (m["value"] or 0) / 1e8)
+
+
+def revenue_section(hist, cfg):
+    rc, ind = cfg["revenue"], cfg["indicators"]
+    out = ["", "四、%s" % rc["title"]]
+    ym, rows = load_revenue()
+    if not ym:
+        return out + ["（還沒有月營收資料。看 Actions 日誌裡「月營收」開頭的幾行，會寫原因）"]
+    desc = {"up": "增", "down": "減", "flat": "持平"}
+    sort_key = {"yoy_abs": lambda x: -abs(x[1]), "mom_abs": lambda x: -abs(x[2]), "value": lambda x: -(x[3]["value"] or 0)}.get(rc["sort"]) or (lambda x: -abs(x[1]))
+    valid = {}
+    for code, r in rows.items():
+        rev, prev, ly = f(r["rev"]), f(r["prev"]), f(r["ly"])
+        if is_stock(code) and None not in (rev, prev, ly) and prev > 0 and ly > 0:
+            valid[code] = (rev, prev, ly)
+    out += ["月營收資料月份 %s，有完整數字的 %d 家（每月 10 日前各公司陸續公布，月初幾天家數會偏少）" % (ym, len(valid)),
+            "年增率＝當月比去年同月，月增率＝當月比上月；去年同月、上月為 0 的不列入。"]
+    for p in rc["patterns"]:
+        hit = []
+        for code, (rev, prev, ly) in valid.items():
+            if p.get("yoy", "any") in ("any", direction(rev, ly)) and p.get("mom", "any") in ("any", direction(rev, prev)):
+                hit.append(code)
+        keep = []
+        for code in hit:
+            m = metrics(code, hist, ind)
+            if m and m["close"] is not None and (m["value"] or 0) >= rc["min_value"]:
+                rev, prev, ly = valid[code]
+                keep.append((code, (rev / ly - 1) * 100, (rev / prev - 1) * 100, m))
+        keep.sort(key=sort_key)
+        top = keep[:int(rc["max_results"])]
+        cond = "今年%s於去年同月、本月%s於上月" % ({"up": "高", "down": "低"}.get(p.get("yoy"), "不限"), {"up": "高", "down": "低"}.get(p.get("mom"), "不限"))
+        out += ["", "【%s】（%s）符合 %d 家，其中成交值 ≥ %.1f 億的 %d 家，列出前 %d 家（依%s）" % (
+            p["name"], cond, len(hit), rc["min_value"] / 1e8, len(keep), len(top), {"yoy_abs": "年增率絕對值", "mom_abs": "月增率絕對值", "value": "成交值"}.get(rc["sort"], "年增率絕對值"))]
+        out += [rev_line(m, y, mo) for _, y, mo, m in top] or ["（沒有）"]
+    return out
+
+
+def inst_rank_section(hist, cfg):
+    ir, ind = cfg["inst_rank"], cfg["indicators"]
+    col = INST_COL[ir["who"]]
+    out = ["", "五、%s（%s淨買超）" % (ir["title"], INST_NAME[ir["who"]])]
+    window = hist[-int(ir["lookback"]):]
+    days_with = sum(1 for _, rows in window if any(x.get(col, "") != "" for x in rows.values()))
+    ranked = []
+    for code in hist[-1][1]:
+        if not is_stock(code):
+            continue
+        streak, cum = 0, 0.0
+        for _, rows in reversed(window):
+            v = f(rows.get(code, {}).get(col))
+            if v is None or v <= 0:
+                break
+            streak += 1
+            cum += v
+        if streak >= int(ir["min_days"]):
+            m = metrics(code, hist, ind)
+            if m and m["close"] is not None and (m["value"] or 0) >= ir["min_value"]:
+                ranked.append((streak, cum, f(hist[-1][1][code].get(col)), m))
+    ranked.sort(key=lambda x: (-x[0], -x[1]))
+    top = ranked[:int(ir["top"])]
+    out.append("連續買超 ≥ %d 日、成交值 ≥ %.1f 億的共 %d 檔，列出前 %d 檔（先比連買日數，再比累計張數）；目前有法人資料的交易日 %d 天。" % (
+        ir["min_days"], ir["min_value"] / 1e8, len(ranked), len(top), days_with))
+    for i, (streak, cum, today_v, m) in enumerate(top, 1):
+        close = ("收 %s" % ("%.2f" % m["close"]).rstrip("0").rstrip(".")) + ("（%+.2f%%）" % m["pct"] if m["pct"] is not None else "")
+        out.append("%d. %s %s｜連買 %d 日｜累計 %+d張｜今日 %+d張｜%s" % (i, m["code"], m["name"], streak, round(cum / 1000), round((today_v or 0) / 1000), close))
+    if not top:
+        out.append("（%s）" % ("法人資料累積天數還不到 %d 天，排名暫時是空的" % ir["min_days"] if days_with < int(ir["min_days"]) else "沒有符合的股票"))
+    out.append("※ 上櫃股票的法人資料只從開始收集那天起累積，連買日數可能比實際短。")
+    return out
+
+
 # ---------- 組信 ----------
 def build(d, cfg, pending=()):
     need = max(cfg["indicators"]["ma_days"], cfg["indicators"]["vol_short_days"], cfg["indicators"]["vol_long_days"],
-               int(cfg["screen"]["inst_streak"]["days"]))
+               int(cfg["screen"]["inst_streak"]["days"]), int(cfg["inst_rank"]["lookback"]) if cfg["inst_rank"]["enabled"] else 0)
     hist = history(d, need)
     if not hist or hist[-1][0] != d.isoformat():
         raise RuntimeError("找不到 %s 的資料檔" % d)
@@ -254,6 +345,10 @@ def build(d, cfg, pending=()):
         body.append("  （通過成交值這關但歷史不足 %d 日、算不出乖離率或量比的有 %d 檔，已排除）" % (max(ind["ma_days"], ind["vol_long_days"]), short))
     if inst_note:
         body.append("  ※ " + inst_note)
+    if cfg["revenue"]["enabled"]:
+        body += revenue_section(hist, cfg)
+    if cfg["inst_rank"]["enabled"]:
+        body += inst_rank_section(hist, cfg)
     body += ["", "說明：乖離率與均線用未還原的收盤價，期間遇到除權息會有些微誤差。外資、投信單位為張。",
              "以上只是依你設定的規則整理資料，不是買賣建議。規則在 scan_config.json。"]
     text = "\n".join(body)
