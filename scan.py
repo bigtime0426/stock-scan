@@ -14,6 +14,9 @@
   python scan.py --dry              只印出信的內容，不寄信、不存檔
   python scan.py --mail-test        只寄一封測試信，確認 MAIL_URL / MAIL_TOKEN 設定正確
 
+資料「齊了」的定義：價量、上櫃本益比、上市與上櫃的法人買賣超都已確認是當天的（NEEDED）。
+證交所的殖利率／淨值比與融資融券這封信用不到，不列入。
+
 環境變數：MAIL_URL、MAIL_TOKEN（寄信）、LAST_RUN=1（當天最後一次排程：資料還沒齊也寄一封，信裡會註明）、
 FORCE=1（等同 --force）。
 """
@@ -39,6 +42,9 @@ DEFAULTS = {
                "vol_ratio_max": 0.7, "sort": "value", "max_results": 20,
                "inst_streak": {"enabled": False, "who": "foreign", "days": 3}},
 }
+# 掃描信真正用到的來源：價量（含上市本益比）、上櫃本益比、法人買賣超。
+# 證交所的殖利率／淨值比（twse_fund）和各市場融資融券這封信沒用到，沒齊不影響信件，也不擋寄信。
+NEEDED = ["twse_prices", "tpex_prices", "tpex_fund", "twse_inst", "tpex_inst"]
 # 哪個來源沒齊，會影響信裡的什麼
 AFFECT = {"twse_inst": "上市法人買賣超", "tpex_inst": "上櫃法人買賣超", "twse_fund": "上市本益比", "tpex_fund": "上櫃本益比（上櫃股票不會進候選名單）",
           "twse_margin": "上市融資融券（本信未使用）", "tpex_margin": "上櫃融資融券（本信未使用）"}
@@ -272,7 +278,7 @@ def run(d, force=False, last_run=False, dry=False):
         return
     meta = collect.load_meta(d)
     src = meta.get("sources", {})
-    pending = [k for k in collect.ALL if src.get(k) != "ok"]
+    pending = [k for k in NEEDED if src.get(k) != "ok"]
     complete = bool(meta) and not pending
     try:
         sent = json.load(open(smeta_path(d), encoding="utf-8")).get("sent")
