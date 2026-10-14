@@ -9,7 +9,8 @@
   python collect.py --backfill 40      回補最近 40 個交易日的「價量」（沒有法人、本益比、融資券）
 
 只讀環境變數 MAIL_URL、MAIL_TOKEN（寄通知信，選用）、LAST_RUN（當天最後一次排程設為 1）、
-SCAN_MAIL（設為 1 時，資料齊全的通知改由 scan.py 的掃描信取代；缺漏警告仍由這裡寄）。
+SCAN_MAIL（設為 1 時，「資料已更新」與「資料部分缺漏」的通知都改由 scan.py 負責，只針對掃描用得到的來源；
+缺單邊行情、沒有存檔的警告仍由這裡寄）。
 """
 import argparse
 import csv
@@ -115,6 +116,15 @@ def norm_date(s):
     return None
 
 
+def fresh(label, got, d):
+    """來源資料的日期是不是 d。對不上時在日誌寫出來源的日期，方便判斷是『還沒更新』還是別的問題。"""
+    nd = norm_date(got)
+    if nd == d.isoformat():
+        return True
+    print("  %s：來源資料日期是 %s，要的是 %s（來源還沒更新，或日期格式有變）" % (label, nd or repr(got), d.isoformat()))
+    return False
+
+
 def pick_table(obj, need):
     for t in obj.get("tables") or []:
         h = [hdr(f) for f in t.get("fields") or []]
@@ -188,7 +198,9 @@ def tpex_prices(d):
 # ---------- 三大法人（只收淨買賣超股數） ----------
 def twse_inst(d):
     obj = get_json(TWSE_WEB + "/fund/T86", {"date": d.strftime("%Y%m%d"), "selectType": "ALLBUT0999", "response": "json"})
-    if not isinstance(obj, dict) or str(obj.get("stat")).upper() != "OK" or norm_date(obj.get("date")) != d.isoformat():
+    if not isinstance(obj, dict) or str(obj.get("stat")).upper() != "OK":
+        return None
+    if not fresh("twse_inst", obj.get("date"), d):
         return None
     f = [hdr(x) for x in obj.get("fields") or []]
     need = ["證券代號", "外陸資買賣超股數(不含外資自營商)", "外資自營商買賣超股數", "投信買賣超股數", "自營商買賣超股數", "三大法人買賣超股數"]
@@ -216,7 +228,7 @@ def _key(r, name):
 
 def tpex_inst(d):
     rows = get_json(TPEX_OPEN + "/tpex_3insti_daily_trading")
-    if not isinstance(rows, list) or not rows or norm_date(rows[0].get("Date")) != d.isoformat():
+    if not isinstance(rows, list) or not rows or not fresh("tpex_inst", rows[0].get("Date"), d):
         return None
     keys = {n: _key(rows[0], n) for n in ("SecuritiesCompanyCode", "ForeignInvestorsIncludeMainlandAreaInvestors-Difference",
                                           "SecuritiesInvestmentTrustCompanies-Difference", "Dealers-Difference", "TotalDifference")}
@@ -235,7 +247,7 @@ def tpex_inst(d):
 # ---------- 本益比、殖利率、股價淨值比 ----------
 def twse_fund(d):
     rows = get_json(TWSE_OPEN + "/exchangeReport/BWIBBU_ALL")
-    if not isinstance(rows, list) or not rows or norm_date(rows[0].get("Date")) != d.isoformat():
+    if not isinstance(rows, list) or not rows or not fresh("twse_fund", rows[0].get("Date"), d):
         return None
     return {str(r.get("Code", "")).strip(): {"pe": num(r.get("PEratio")) or None, "yield": num(r.get("DividendYield")),
                                             "pb": num(r.get("PBratio"))} for r in rows}
@@ -243,7 +255,7 @@ def twse_fund(d):
 
 def tpex_fund(d):
     rows = get_json(TPEX_OPEN + "/tpex_mainboard_peratio_analysis")
-    if not isinstance(rows, list) or not rows or norm_date(rows[0].get("Date")) != d.isoformat():
+    if not isinstance(rows, list) or not rows or not fresh("tpex_fund", rows[0].get("Date"), d):
         return None
     return {str(r.get("SecuritiesCompanyCode", "")).strip(): {"pe": num(r.get("PriceEarningRatio")) or None,
                                                              "yield": num(r.get("YieldRatio")), "pb": num(r.get("PriceBookRatio"))} for r in rows}
@@ -267,7 +279,7 @@ def twse_margin(d):
 
 def tpex_margin(d):
     rows = get_json(TPEX_OPEN + "/tpex_mainboard_margin_balance")
-    if not isinstance(rows, list) or not rows or norm_date(rows[0].get("Date")) != d.isoformat():
+    if not isinstance(rows, list) or not rows or not fresh("tpex_margin", rows[0].get("Date"), d):
         return None
     out = {}
     for r in rows:
@@ -483,7 +495,7 @@ def run_day(d, last_run=False):
         body += ["%s 上漲 %d／下跌 %d／持平 %d（一般股票 %d 檔）" % (a["market"], a["up"], a["down"], a["flat"], a["n"]) for a in ad]
         if send_mail("【台股】%s 資料已更新" % d, "\n".join(body)):
             meta["mailed"] = True
-    elif pending and last_run and not meta.get("warned"):
+    elif pending and last_run and not meta.get("warned") and not os.environ.get("SCAN_MAIL"):
         if send_mail("【台股】%s 資料部分缺漏" % d, "今天最後一次排程後，這些來源仍沒確認到當天資料：\n" + "\n".join(pending)
                      + "\n\n價量已存檔；缺的欄位是空白。可稍後到 Actions 手動重跑 --date %s。" % d):
             meta["warned"] = True
