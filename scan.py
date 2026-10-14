@@ -63,14 +63,16 @@ def merge(base, new):
 
 
 def load_config(path=CONFIG):
+    missing = False
     try:
         raw = json.load(open(path, encoding="utf-8"))
     except FileNotFoundError:
         print("找不到 %s，使用內建預設值" % path)
-        raw = {}
+        raw, missing = {}, True
     except ValueError as e:
         raise ValueError("%s 格式有誤（是不是多了或少了逗號、引號？）：%s" % (path, e))
     cfg = merge(DEFAULTS, raw)
+    cfg["_missing"] = missing
     cfg["holdings"] = [str(c) for c in cfg["holdings"]]
     cfg["watchlist"] = [str(c) for c in cfg["watchlist"]]
     return cfg
@@ -234,8 +236,10 @@ def build(d, cfg, pending=()):
         body += ["", "⚠ 資料還沒齊（這是當天最後一次排程）。未確認的來源："]
         body += ["  - %s：%s" % (k, AFFECT.get(k, "")) for k in pending]
         body += ["  相關欄位可能是空白或前一天的值，請自行斟酌。"]
-    body += ["", "一、持股（%d 檔，%d 檔有標記）" % (len(h_rows), h_flag)] + h_rows
-    body += ["", "二、追蹤清單（%d 檔，%d 檔有標記）" % (len(w_rows), w_flag)] + w_rows
+    if cfg.get("_missing"):
+        body += ["", "⚠ 找不到 scan_config.json（要放在倉庫根目錄，檔名要完全一樣），這封信用的是內建預設值，持股與追蹤清單是空的。"]
+    body += ["", "一、持股（%d 檔，%d 檔有標記）" % (len(cfg["holdings"]), h_flag)] + (h_rows or ["（scan_config.json 裡沒有設定）"])
+    body += ["", "二、追蹤清單（%d 檔，%d 檔有標記）" % (len(cfg["watchlist"]), w_flag)] + (w_rows or ["（scan_config.json 裡沒有設定）"])
     body += ["", "三、全市場候選（符合全部條件 %d 檔，列出前 %d 檔）" % (len(cands), len(top))]
     for m in top:
         body.append(line(m, [tag_of[m["code"]]] if m["code"] in tag_of else [], with_value=True))
