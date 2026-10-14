@@ -7,6 +7,9 @@
   python collect.py                    收集最近一個交易日（台灣時間 17:00 前算前一天）
   python collect.py --date 2026-10-08  指定日期
   python collect.py --backfill 40      回補最近 40 個交易日的「價量」（沒有法人、本益比、融資券）
+  python collect.py --backfill-inst 40 替最近 40 個已存檔的交易日補上「上市」三大法人買賣超（上櫃的歷史來源未確認，不補）
+
+每次正常執行還會順便更新「月營收」（data/revenue/YYYY-MM.csv），失敗不影響上面的每日資料。
 
 只讀環境變數 MAIL_URL、MAIL_TOKEN（寄通知信，選用）、LAST_RUN（當天最後一次排程設為 1）、
 SCAN_MAIL（設為 1 時，「資料已更新」與「資料部分缺漏」的通知都改由 scan.py 負責，只針對掃描用得到的來源；
@@ -423,6 +426,133 @@ def send_mail(subject, body):
     return False
 
 
+# ---------- 月營收（公開資訊觀測站的彙總，每月 10 日前各公司陸續公布） ----------
+REV_DIR = DATA + "/revenue"
+# 每個市場依序試這些網址，第一個有資料的就用（路徑是依我的記憶寫的，沒實測過，所以放了備援）
+REV_SOURCES = [("TWSE", [TWSE_OPEN + "/opendata/t187ap05_L"]),
+               ("TPEx", [TWSE_OPEN + "/opendata/t187ap05_O", TPEX_OPEN + "/mopsfin_t187ap05_O"])]
+
+
+def norm_ym(s):
+    """'11509'（民國）、'202609'、'2026/09' → '2026-09'；看不懂回 None。"""
+    d = re.sub(r"\D", "", str(s or ""))
+    try:
+        if len(d) == 5:
+            return "%04d-%02d" % (int(d[:3]) + 1911, int(d[3:]))
+        if len(d) == 6:
+            return "%04d-%02d" % (int(d[:4]), int(d[4:]))
+    except ValueError:
+        pass
+    return None
+
+
+def _rkey(keys, *must, no=()):
+    for k in keys:
+        kk = re.sub(r"\s+", "", k)
+        if all(m in kk for m in must) and not any(n in kk for n in no):
+            return k
+    return None
+
+
+def parse_revenue(rows):
+    """月營收彙總 → ({代號: {name, ym, rev, prev, ly}}, 說明)。欄位用中文名稱片段比對，名稱有些微差異也能認。
+    rev＝當月營收、prev＝上月營收、ly＝去年同月營收（單位照來源，不換算）。失敗回 (None, 原因)。"""
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None, "回應不是資料列（可能網址不對或沒有資料）"
+    keys = list(rows[0].keys())
+    k = {"code": _rkey(keys, "公司代號"), "name": _rkey(keys, "公司名稱"), "ym": _rkey(keys, "資料年月"),
+         "rev": _rkey(keys, "當月營收", no=("去年", "累計")), "prev": _rkey(keys, "上月營收", no=("累計",)),
+         "ly": _rkey(keys, "去年當月營收")}
+    miss = [n for n, v in k.items() if v is None and n != "name"]
+    if miss:
+        return None, "找不到欄位 %s；來源欄位有：%s" % ("、".join(miss), "、".join(keys[:12]))
+    out = {}
+    for r in rows:
+        code = str(r.get(k["code"], "")).strip()
+        if code:
+            out[code] = {"name": str(r.get(k["name"], "")).strip() if k["name"] else "", "ym": norm_ym(r.get(k["ym"])),
+                         "rev": num(r.get(k["rev"])), "prev": num(r.get(k["prev"])), "ly": num(r.get(k["ly"]))}
+    return (out or None), ("" if out else "沒有資料列")
+
+
+def fetch_revenue():
+    out, notes = {}, []
+    for market, urls in REV_SOURCES:
+        for u in urls:
+            data, why = parse_revenue(get_json(u))
+            if data:
+                for code, rec in data.items():
+                    rec["market"] = market
+                    out[code] = rec
+                print("月營收 %s：%d 家（%s）" % (market, len(data), u.split("/")[-1]))
+                break
+            notes.append("%s %s：%s" % (market, u.split("/")[-1], why))
+    return out, notes
+
+
+def update_revenue():
+    """抓月營收並存成 data/revenue/YYYY-MM.csv（只留來源裡最新的資料月份；同月份重抓時，新的蓋掉舊的、沒抓到的保留）。失敗只記錄。"""
+    try:
+        out, notes = fetch_revenue()
+        os.makedirs(META, exist_ok=True)
+        meta = {"updated": dt.datetime.now(TZ).isoformat(), "notes": notes}
+        for n in notes:
+            print("  月營收備註：", n)
+        rows = {c: r for c, r in out.items() if r["ym"]}
+        if not rows:
+            print("月營收：這次沒有取得資料；舊檔保留")
+            json.dump(dict(meta, ym=None, rows=0), open(META + "/revenue.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            return
+        ym = max(r["ym"] for r in rows.values())
+        cur = {c: r for c, r in rows.items() if r["ym"] == ym}
+        os.makedirs(REV_DIR, exist_ok=True)
+        path = "%s/%s.csv" % (REV_DIR, ym)
+        merged = {}
+        if os.path.exists(path):
+            with open(path, encoding="utf-8-sig", newline="") as fh:
+                merged = {r["code"]: r for r in csv.DictReader(fh)}
+        for c, r in cur.items():
+            merged[c] = {"code": c, "name": r["name"], "market": r["market"], "ym": ym, "rev": fmt(r["rev"]), "prev": fmt(r["prev"]), "ly": fmt(r["ly"])}
+        with open(path, "w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=["code", "name", "market", "ym", "rev", "prev", "ly"])
+            w.writeheader()
+            w.writerows(sorted(merged.values(), key=lambda r: r["code"]))
+        n_tw = sum(1 for r in merged.values() if r["market"] == "TWSE")
+        print("月營收：資料月份 %s，共 %d 家（上市 %d、上櫃 %d）→ %s" % (ym, len(merged), n_tw, len(merged) - n_tw, path))
+        json.dump(dict(meta, ym=ym, rows=len(merged)), open(META + "/revenue.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    except Exception as e:  # noqa: BLE001
+        print("月營收更新失敗：%s %s" % (type(e).__name__, str(e)[:150]))
+
+
+def backfill_inst(start, n):
+    """替最近 n 個已存檔的交易日補上「上市」三大法人買賣超（證交所的網站 JSON 可指定日期）。
+    上櫃的歷史來源我沒有確認過，不補，上櫃從開始收集那天起累積。已經有資料的日子略過。"""
+    days = sorted(x[:-4] for x in os.listdir(DATA) if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.csv", x) and x[:-4] <= start.isoformat())[-n:]
+    done = 0
+    for ds in days:
+        d = dt.date.fromisoformat(ds)
+        rows = load_csv(csv_path(d))
+        tw = [r for r in rows.values() if r["market"] == "TWSE"]
+        if any(r["foreign_net"] != "" for r in tw):
+            continue
+        data = twse_inst(d)
+        time.sleep(SLEEP * 2)
+        if data is None:
+            print("略過 %s：證交所沒有這天的法人資料" % ds)
+            continue
+        for r in tw:
+            for k, v in (data.get(r["code"]) or {}).items():
+                r[k] = fmt(v)
+        write_csv(d, list(rows.values()))
+        meta = load_meta(d)
+        if meta:
+            meta.setdefault("sources", {})["twse_inst"] = "ok"
+            save_meta(d, meta)
+        done += 1
+        print("補上市法人 %s：%d 檔" % (ds, len(tw)))
+    print("上市法人歷史回補完成：本次補了 %d 天（共檢查 %d 天）" % (done, len(days)))
+
+
 # ---------- 主流程 ----------
 def latest_weekday(now):
     d = now.date()
@@ -538,13 +668,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="")
     ap.add_argument("--backfill", type=int, default=0)
+    ap.add_argument("--backfill-inst", type=int, default=0)
     args = ap.parse_args()
     target = latest_weekday(dt.datetime.now(TZ))
+    if args.backfill_inst > 0:
+        backfill_inst(target, args.backfill_inst)
+        return
     if args.backfill > 0:
         backfill(target, args.backfill)
         return
     d = dt.date.fromisoformat(args.date) if args.date else target
     run_day(d, last_run=os.environ.get("LAST_RUN") == "1")
+    update_revenue()
 
 
 if __name__ == "__main__":
