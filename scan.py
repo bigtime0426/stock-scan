@@ -152,12 +152,17 @@ def line(m, tags=(), with_value=False):
              "PE %.1f" % m["pe"] if m["pe"] is not None else "PE -",
              "乖離 %+.1f%%" % m["bias"] if m["bias"] is not None else "乖離 -（均線資料不足）",
              "量比 %.2f" % m["vol_ratio"] if m["vol_ratio"] is not None else "量比 -"]
+    # 第二行：成交值、法人買賣超、標記（拆行是為了避免 Gmail 在行中間斷字）
+    second = []
     if with_value and m["value"] is not None:
-        parts.append("成交 %.1f億" % (m["value"] / 1e8))
+        second.append("成交 %.1f億" % (m["value"] / 1e8))
     if m["foreign"] is not None or m["trust"] is not None:
-        parts.append("外資 %s張 投信 %s張" % (lots(m["foreign"]) if m["foreign"] is not None else "-", lots(m["trust"]) if m["trust"] is not None else "-"))
+        second.append("外資 %s張 投信 %s張" % (lots(m["foreign"]) if m["foreign"] is not None else "-", lots(m["trust"]) if m["trust"] is not None else "-"))
     s = "｜".join(parts)
-    return s + ("　【" + "；".join(tags) + "】" if tags else "")
+    tail = "｜".join(second)
+    if tags:
+        tail += ("　" if tail else "") + "【" + "；".join(tags) + "】"
+    return s + ("\n　" + tail if tail else "")
 
 
 # ---------- 篩選 ----------
