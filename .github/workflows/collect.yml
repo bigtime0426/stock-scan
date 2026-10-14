@@ -1,11 +1,13 @@
 name: stock-collect
 
-# 台灣時間 18:05、20:05、22:05 各跑一次（各來源更新時間不同，沒更新完就下一輪再補）
+# 台灣時間 18:05、20:05、22:05 各跑一次，隔天 07:05 再補一次（各來源更新時間不同，沒更新完就下一輪再補）
+# 每次先收集資料，再依 scan_config.json 掃描並寄一封信
 on:
   schedule:
     - cron: '5 10 * * 1-5'
     - cron: '5 12 * * 1-5'
     - cron: '5 14 * * 1-5'
+    - cron: '5 23 * * 0-4'    # 台灣時間隔天 07:05：補抓前一天還沒更新的來源（證交所 OpenAPI 的資料有時更新得晚）
   workflow_dispatch:
     inputs:
       backfill:
@@ -14,6 +16,9 @@ on:
       date:
         description: '指定日期 YYYY-MM-DD（留空 = 最近一個交易日）'
         default: ''
+      test_mail:
+        description: '1 = 只寄一封測試信，確認寄信設定（不收集、不掃描）'
+        default: '0'
 
 permissions:
   contents: write
@@ -38,14 +43,36 @@ jobs:
       - name: 安裝套件
         run: pip install requests
 
+      - name: 寄測試信
+        if: ${{ github.event.inputs.test_mail == '1' }}
+        env:
+          MAIL_URL: ${{ secrets.MAIL_URL }}
+          MAIL_TOKEN: ${{ secrets.MAIL_TOKEN }}
+        run: python scan.py --mail-test
+
       - name: 收集資料
+        if: ${{ github.event.inputs.test_mail != '1' }}
         env:
           MAIL_URL: ${{ secrets.MAIL_URL }}
           MAIL_TOKEN: ${{ secrets.MAIL_TOKEN }}
           LAST_RUN: ${{ github.event.schedule == '5 14 * * 1-5' && '1' || '0' }}
+          SCAN_MAIL: '1'
           BACKFILL: ${{ github.event.inputs.backfill }}
           TARGET_DATE: ${{ github.event.inputs.date }}
         run: python collect.py --backfill "${BACKFILL:-0}" ${TARGET_DATE:+--date "$TARGET_DATE"}
+
+      # 掃描並寄信。放在「存回資料」之前、而且失敗不影響後面：就算掃描出錯，當天收集到的資料也一定會存回去。
+      # 排程跑：資料齊了才寄（當天最後一輪沒齊也寄一封註明的）。手動跑：一律重寄一封，方便你測試。
+      - name: 掃描並寄信
+        if: ${{ github.event.inputs.test_mail != '1' && (github.event_name == 'schedule' || github.event.inputs.backfill == '' || github.event.inputs.backfill == '0') }}
+        continue-on-error: true
+        env:
+          MAIL_URL: ${{ secrets.MAIL_URL }}
+          MAIL_TOKEN: ${{ secrets.MAIL_TOKEN }}
+          LAST_RUN: ${{ github.event.schedule == '5 14 * * 1-5' && '1' || '0' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          TARGET_DATE: ${{ github.event.inputs.date }}
+        run: python scan.py ${TARGET_DATE:+--date "$TARGET_DATE"}
 
       - name: 存回資料
         run: |
