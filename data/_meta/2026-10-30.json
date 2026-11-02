@@ -5,11 +5,11 @@
   "tpex_prices": "ok",
   "twse_inst": "ok",
   "tpex_inst": "ok",
-  "twse_fund": "pending",
+  "twse_fund": "ok",
   "tpex_fund": "ok",
-  "twse_margin": "pending",
+  "twse_margin": "ok",
   "tpex_margin": "ok"
  },
  "rows": 2407,
- "updated": "2026-10-31T03:15:34.310016+08:00"
+ "updated": "2026-11-02T10:22:13.899947+08:00"
 }
