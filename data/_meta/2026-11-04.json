@@ -1,0 +1,15 @@
+{
+ "date": "2026-11-04",
+ "sources": {
+  "twse_prices": "ok",
+  "tpex_prices": "ok",
+  "twse_inst": "ok",
+  "tpex_inst": "ok",
+  "twse_fund": "pending",
+  "tpex_fund": "ok",
+  "twse_margin": "pending",
+  "tpex_margin": "ok"
+ },
+ "rows": 2408,
+ "updated": "2026-11-05T01:57:15.396691+08:00"
+}
