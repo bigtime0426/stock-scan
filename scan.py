@@ -1,6 +1,7 @@
 """台股掃描：讀 data/ 的每日 CSV，依 scan_config.json 的規則整理成一封通知信。
 
-信分三段：
+信由上到下分成：
+  特別追蹤：scan_config.json 的 focus 指定的幾檔（目前 00631L），除了價格，還有融資、融券餘額與增減
   一、持股：每檔的收盤、本益比、乖離率、量比、法人買賣超，並標出碰到哪些警示條件
   二、追蹤清單：同樣欄位
   三、全市場候選：符合你設定的全部條件的股票，並列出每一關剩下幾檔，方便調整條件
@@ -15,7 +16,7 @@
   python scan.py --mail-test        只寄一封測試信，確認 MAIL_URL / MAIL_TOKEN 設定正確
 
 資料「齊了」的定義：價量、上櫃本益比、上市與上櫃的法人買賣超都已確認是當天的（NEEDED）。
-證交所的殖利率／淨值比與融資融券這封信用不到，不列入。
+證交所的殖利率／淨值比這封信用不到，不列入；融資融券只有在「特別追蹤」開啟時才列入（要等到它確認是當天的）。
 
 環境變數：MAIL_URL、MAIL_TOKEN（寄信）、LAST_RUN=1（當天最後一次排程：資料還沒齊也寄一封，信裡會註明）、
 FORCE=1（等同 --force）。
@@ -43,6 +44,7 @@ DEFAULTS = {
                "inst_streak": {"enabled": False, "who": "foreign", "days": 3}},
     "revenue": {"enabled": True, "title": "市場建議股票掃描", "min_value": 100000000, "max_results": 10, "sort": "yoy_abs",
                 "patterns": [{"name": "年減且月減", "yoy": "down", "mom": "down"}, {"name": "年增且月增", "yoy": "up", "mom": "up"}]},
+    "focus": {"enabled": True, "title": "特別追蹤", "codes": ["00631L"], "margin": True, "days": 5},
     "inst_rank": {"enabled": True, "title": "三大法人連續買超排名", "who": "inst", "min_days": 3, "min_value": 100000000, "top": 10, "lookback": 40},
 }
 # 掃描信真正用到的來源：價量（含上市本益比）、上櫃本益比、法人買賣超。
@@ -50,7 +52,7 @@ DEFAULTS = {
 NEEDED = ["twse_prices", "tpex_prices", "tpex_fund", "twse_inst", "tpex_inst"]
 # 哪個來源沒齊，會影響信裡的什麼
 AFFECT = {"twse_inst": "上市法人買賣超", "tpex_inst": "上櫃法人買賣超", "twse_fund": "上市本益比", "tpex_fund": "上櫃本益比（上櫃股票不會進候選名單）",
-          "twse_margin": "上市融資融券（本信未使用）", "tpex_margin": "上櫃融資融券（本信未使用）"}
+          "twse_margin": "上市融資融券（特別追蹤區用）", "tpex_margin": "上櫃融資融券（特別追蹤區用）"}
 INST_COL = {"foreign": "foreign_net", "trust": "trust_net", "inst": "inst_net"}
 INST_NAME = {"foreign": "外資", "trust": "投信", "inst": "三大法人"}
 
@@ -150,7 +152,7 @@ def line(m, tags=(), with_value=False):
                                   "（%+.2f%%）" % m["pct"] if m["pct"] is not None else "")
     parts = [head,
              "PE %.1f" % m["pe"] if m["pe"] is not None else "PE -",
-             "乖離 %+.1f%%" % m["bias"] if m["bias"] is not None else "乖離 -（均線資料不足）",
+             "乖離 %s%%" % ("%+.1f" % m["bias"] if round(m["bias"], 1) != 0 else "0.0") if m["bias"] is not None else "乖離 -（均線資料不足）",
              "量比 %.2f" % m["vol_ratio"] if m["vol_ratio"] is not None else "量比 -"]
     # 第二行：成交值、法人買賣超、標記（拆行是為了避免 Gmail 在行中間斷字）
     second = []
@@ -226,7 +228,7 @@ def direction(a, b):
 
 def rev_line(m, yoy, mom):
     close = ("收 %s" % ("%.2f" % m["close"]).rstrip("0").rstrip(".")) + ("（%+.2f%%）" % m["pct"] if m["pct"] is not None else "") if m["close"] is not None else "今日無成交"
-    return "%s %s｜年增率 %+.1f%%｜月增率 %+.1f%%｜%s｜成交 %.1f億" % (m["code"], m["name"], yoy, mom, close, (m["value"] or 0) / 1e8)
+    return "%s %s｜年增率 %+.1f%%｜月增率 %+.1f%%\n　%s｜成交 %.1f億" % (m["code"], m["name"], yoy, mom, close, (m["value"] or 0) / 1e8)
 
 
 def revenue_section(hist, cfg):
@@ -242,8 +244,11 @@ def revenue_section(hist, cfg):
         rev, prev, ly = f(r["rev"]), f(r["prev"]), f(r["ly"])
         if is_stock(code) and None not in (rev, prev, ly) and prev > 0 and ly > 0:
             valid[code] = (rev, prev, ly)
-    out += ["月營收資料月份 %s，有完整數字的 %d 家（每月 10 日前各公司陸續公布，月初幾天家數會偏少）" % (ym, len(valid)),
-            "年增率＝當月比去年同月，月增率＝當月比上月；去年同月、上月為 0 的不列入。"]
+    out += ["月營收資料月份 %s，有完整數字的 %d 家" % (ym, len(valid)),
+            "（每月 10 日前各公司陸續公布，月初家數會偏少）",
+            "年增率＝當月比去年同月",
+            "月增率＝當月比上月",
+            "去年同月、上月為 0 的不列入。"]
     for p in rc["patterns"]:
         hit = []
         for code, (rev, prev, ly) in valid.items():
@@ -258,8 +263,9 @@ def revenue_section(hist, cfg):
         keep.sort(key=sort_key)
         top = keep[:int(rc["max_results"])]
         cond = "今年%s於去年同月、本月%s於上月" % ({"up": "高", "down": "低"}.get(p.get("yoy"), "不限"), {"up": "高", "down": "低"}.get(p.get("mom"), "不限"))
-        out += ["", "【%s】（%s）符合 %d 家，其中成交值 ≥ %.1f 億的 %d 家，列出前 %d 家（依%s）" % (
-            p["name"], cond, len(hit), rc["min_value"] / 1e8, len(keep), len(top), {"yoy_abs": "年增率絕對值", "mom_abs": "月增率絕對值", "value": "成交值"}.get(rc["sort"], "年增率絕對值"))]
+        out += ["", "【%s】符合 %d 家" % (p["name"], len(hit)), "（%s）" % cond,
+                "成交值 ≥ %.1f 億的 %d 家，列出前 %d 家" % (rc["min_value"] / 1e8, len(keep), len(top)),
+                "（依%s）" % {"yoy_abs": "年增率絕對值", "mom_abs": "月增率絕對值", "value": "成交值"}.get(rc["sort"], "年增率絕對值")]
         out += [rev_line(m, y, mo) for _, y, mo, m in top] or ["（沒有）"]
     return out
 
@@ -287,21 +293,113 @@ def inst_rank_section(hist, cfg):
                 ranked.append((streak, cum, f(hist[-1][1][code].get(col)), m))
     ranked.sort(key=lambda x: (-x[0], -x[1]))
     top = ranked[:int(ir["top"])]
-    out.append("連續買超 ≥ %d 日、成交值 ≥ %.1f 億的共 %d 檔，列出前 %d 檔（先比連買日數，再比累計張數）；目前有法人資料的交易日 %d 天。" % (
-        ir["min_days"], ir["min_value"] / 1e8, len(ranked), len(top), days_with))
+    out += ["連續買超 ≥ %d 日、成交值 ≥ %.1f 億：共 %d 檔" % (ir["min_days"], ir["min_value"] / 1e8, len(ranked)),
+            "列出前 %d 檔（先比連買日數，再比累計張數）" % len(top),
+            "目前有法人資料的交易日 %d 天。" % days_with]
     for i, (streak, cum, today_v, m) in enumerate(top, 1):
         close = ("收 %s" % ("%.2f" % m["close"]).rstrip("0").rstrip(".")) + ("（%+.2f%%）" % m["pct"] if m["pct"] is not None else "")
-        out.append("%d. %s %s｜連買 %d 日｜累計 %+d張｜今日 %+d張｜%s" % (i, m["code"], m["name"], streak, round(cum / 1000), round((today_v or 0) / 1000), close))
+        out.append("%d. %s %s｜連買 %d 日｜累計 %+d張\n　今日 %+d張｜%s" % (i, m["code"], m["name"], streak, round(cum / 1000), round((today_v or 0) / 1000), close))
     if not top:
         out.append("（%s）" % ("法人資料累積天數還不到 %d 天，排名暫時是空的" % ir["min_days"] if days_with < int(ir["min_days"]) else "沒有符合的股票"))
-    out.append("※ 上櫃股票的法人資料只從開始收集那天起累積，連買日數可能比實際短。")
+    out += ["※ 上櫃股票的法人資料只從開始收集那天起累積，", "　連買日數可能比實際短。"]
+    return out
+
+
+# ---------- 特別追蹤（價格 + 融資融券） ----------
+def needed_sources(cfg, d):
+    """這封信一定要確認的來源。特別追蹤要看融資融券時，加上該檔所屬市場的融資融券來源。"""
+    need = list(NEEDED)
+    fc = cfg["focus"]
+    if fc["enabled"] and fc["margin"]:
+        today = collect.load_csv(collect.csv_path(d))
+        markets = {today[c]["market"] for c in fc["codes"] if c in today} or {"TWSE"}
+        for m in markets:
+            k = "twse_margin" if m == "TWSE" else "tpex_margin"
+            if k not in need:
+                need.append(k)
+    return need
+
+
+def sgn(x):
+    return format(int(round(x)), "+,d")
+
+
+def margin_view(code, hist):
+    """回傳 [(日期, 融資餘額, 融資增減, 融券餘額, 融券增減)]，由舊到新。增減缺資料時為 None。
+    融資增減直接用資料裡的 margin_chg；融券增減用「今天餘額 − 前一個交易日餘額」（資料沒有現成欄位）。"""
+    out, prev_short = [], None
+    for day, rows in hist:
+        r = rows.get(code) or {}
+        mb, mc, sb = f(r.get("margin_bal")), f(r.get("margin_chg")), f(r.get("short_bal"))
+        sc = sb - prev_short if sb is not None and prev_short is not None else None
+        out.append((day, mb, mc, sb, sc))
+        prev_short = sb
+    return out
+
+
+def focus_section(hist, cfg, pending=()):
+    fc, ind, al = cfg["focus"], cfg["indicators"], cfg["alerts"]
+    out = ["", "%s%s" % (fc["title"], "（價格＋融資融券）" if fc["margin"] else "")]
+    margin_late = any(k.endswith("_margin") for k in pending)
+    for code in fc["codes"]:
+        m = metrics(code, hist, ind)
+        if m is None:
+            out.append("%s｜查無今日資料（代號有誤、停牌，或尚未上市櫃）" % code)
+            continue
+        out.append(line(m, flags(m, al, ind), with_value=True))
+        if not fc["margin"]:
+            continue
+        if margin_late:
+            out.append("　融資融券：來源還沒更新到今天，這封信先不列數字（補齊後會再寄一封）")
+            continue
+        view = margin_view(code, hist)
+        day, mb, mc, sb, sc = view[-1]
+        if mb is None and sb is None:
+            out.append("　融資融券：這檔沒有資料（可能不能融資融券，或來源沒有它）")
+            continue
+        if mc is None and mb is not None and len(view) > 1 and view[-2][1] is not None:
+            mc = mb - view[-2][1]
+        if mb is not None:
+            pct = "（%+.1f%%）" % (mc / (mb - mc) * 100) if mc is not None and mb - mc > 0 else ""
+            out.append("　融資餘額 %s張｜增減 %s%s" % (format(int(mb), ","), sgn(mc) + "張" if mc is not None else "-", pct))
+        if sb is not None:
+            out.append("　融券餘額 %s張｜增減 %s" % (format(int(sb), ","), sgn(sc) + "張" if sc is not None else "-（前一日無資料）"))
+        if mb and sb is not None:
+            out.append("　券資比 %.1f%%" % (sb / mb * 100))
+        n = int(fc["days"])
+        if n > 0 and len(view) > 1:
+            out.append("　近 %d 日（融資增減／融券增減，張）" % min(n, len(view)))
+            for day, mb2, mc2, sb2, sc2 in view[-n:]:
+                out.append("　%s　融資 %s　融券 %s" % (day[5:].replace("-", "/"), sgn(mc2) if mc2 is not None else "-", sgn(sc2) if sc2 is not None else "-"))
+    if fc["margin"] and not margin_late:
+        out.append("　※ 融資融券單位為張（依證交所定義）；增減＝今天餘額減前一日餘額。")
     return out
 
 
 # ---------- 組信 ----------
+def focus_subject(hist, cfg, pending=()):
+    """信件標題尾巴：第一檔特別追蹤股票的收盤與融資增減，不開信也看得到。"""
+    fc = cfg["focus"]
+    if not (fc["enabled"] and fc["codes"]):
+        return ""
+    code = fc["codes"][0]
+    m = metrics(code, hist, cfg["indicators"])
+    if m is None or m["close"] is None:
+        return ""
+    s = "｜%s %s" % (code, ("%.2f" % m["close"]).rstrip("0").rstrip("."))
+    if m["pct"] is not None:
+        s += "（%+.2f%%）" % m["pct"]
+    if fc["margin"] and not any(k.endswith("_margin") for k in pending):
+        mc = margin_view(code, hist)[-1][2]
+        if mc is not None:
+            s += " 融資 %s" % sgn(mc)
+    return s
+
+
 def build(d, cfg, pending=()):
     need = max(cfg["indicators"]["ma_days"], cfg["indicators"]["vol_short_days"], cfg["indicators"]["vol_long_days"],
-               int(cfg["screen"]["inst_streak"]["days"]), int(cfg["inst_rank"]["lookback"]) if cfg["inst_rank"]["enabled"] else 0)
+               int(cfg["screen"]["inst_streak"]["days"]), int(cfg["inst_rank"]["lookback"]) if cfg["inst_rank"]["enabled"] else 0,
+               int(cfg["focus"]["days"]) + 1 if cfg["focus"]["enabled"] else 0)
     hist = history(d, need)
     if not hist or hist[-1][0] != d.isoformat():
         raise RuntimeError("找不到 %s 的資料檔" % d)
@@ -334,6 +432,8 @@ def build(d, cfg, pending=()):
         body += ["  相關欄位可能是空白或前一天的值，請自行斟酌。"]
     if cfg.get("_missing"):
         body += ["", "⚠ 找不到 scan_config.json（要放在倉庫根目錄，檔名要完全一樣），這封信用的是內建預設值，持股與追蹤清單是空的。"]
+    if cfg["focus"]["enabled"]:
+        body += focus_section(hist, cfg, pending)
     body += ["", "一、持股（%d 檔，%d 檔有標記）" % (len(cfg["holdings"]), h_flag)] + (h_rows or ["（scan_config.json 裡沒有設定）"])
     body += ["", "二、追蹤清單（%d 檔，%d 檔有標記）" % (len(cfg["watchlist"]), w_flag)] + (w_rows or ["（scan_config.json 裡沒有設定）"])
     body += ["", "三、全市場候選（符合全部條件 %d 檔，列出前 %d 檔）" % (len(cands), len(top))]
@@ -359,7 +459,7 @@ def build(d, cfg, pending=()):
     text = "\n".join(body)
     if len(text) > 7500:
         text = text[:7500] + "\n…（信件過長，已截斷）"
-    subject = "【台股】%s 收盤掃描：候選 %d 檔／警示 %d 檔%s" % (d.isoformat(), len(cands), h_flag + w_flag, "（資料未齊）" if pending else "")
+    subject = "【台股】%s 收盤掃描：候選 %d 檔／警示 %d 檔%s%s" % (d.isoformat(), len(cands), h_flag + w_flag, focus_subject(hist, cfg, pending), "（資料未齊）" if pending else "")
     return subject, text, top
 
 
@@ -382,7 +482,8 @@ def run(d, force=False, last_run=False, dry=False):
         return
     meta = collect.load_meta(d)
     src = meta.get("sources", {})
-    pending = [k for k in NEEDED if src.get(k) != "ok"]
+    cfg = load_config()
+    pending = [k for k in needed_sources(cfg, d) if src.get(k) != "ok"]
     complete = bool(meta) and not pending
     try:
         sent = json.load(open(smeta_path(d), encoding="utf-8")).get("sent")
@@ -398,7 +499,6 @@ def run(d, force=False, last_run=False, dry=False):
         if not complete and sent:
             print("%s 已經寄過未齊版本，略過" % d)
             return
-    cfg = load_config()
     subject, body, top = build(d, cfg, [] if complete else pending)
     if dry:
         print(subject)
